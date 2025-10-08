@@ -1,9 +1,9 @@
 {
-  "name": "your-vendor/your-microservice",
+  "name": "fine-microservice",
   "description": "A minimal Slim 4 microservice",
   "type": "project",
   "require": {
-    "php": "^8.2",
+    "php": "^8.4",
     "slim/slim": "^4.13",
     "slim/psr7": "^1.6",
     "php-di/php-di": "^7.1"

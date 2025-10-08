@@ -1,4 +1,4 @@
-# Use: make up, make down, make logs, make ps, make exec s=<service> c="<cmd>"
+# Use: make up, make down, make logs, make ps
 COMPOSE ?= docker compose
 
 .PHONY: up down build start stop restart logs ps exec
