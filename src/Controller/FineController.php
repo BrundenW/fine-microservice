@@ -15,13 +15,29 @@ final class FineController
     public function __construct(private PDO $pdo) {}
 
     /**
-     * List all fines with pagination
+     * Apply overdue penalties of 20% to all eligible fines.
+     */
+    private function applyOverduePenalties(): void
+    {
+        $sql = "UPDATE fines
+                SET status = 'overdue',
+                    fine_amount = ROUND(fine_amount * 1.20, 2)
+                WHERE status <> 'paid'
+                  AND status <> 'overdue'
+                  AND date_issued <= (CURRENT_DATE - INTERVAL '30 days')";
+        $this->pdo->exec($sql);
+    }
+
+    /**
+     * List all fines with pagination.
      * @param Request $request The request object
      * @param Response $response The response object
      * @return Response JSON response containing list of fines
      */
     public function list(Request $request, Response $response): Response
     {
+       $this->applyOverduePenalties();
+
        $params = $request->getQueryParams();
        $limit = isset($params['limit']) ? max(1, min(100, (int)$params['limit'])) : 50;
        $offset = isset($params['offset']) ? max(0, (int)$params['offset']) : 0;
@@ -45,6 +61,8 @@ final class FineController
      */
     public function get(Request $request, Response $response, array $args): Response
     {
+        $this->applyOverduePenalties();
+
         $id = (int)$args['id'];
         $stmt = $this->pdo->prepare('SELECT * FROM fines WHERE fine_id = :id');
         $stmt->execute([':id' => $id]);
@@ -76,6 +94,15 @@ final class FineController
 
         $status = $data['status'] ?? 'unpaid';
 
+        // Frequent offender surcharge
+        $countStmt = $this->pdo->prepare("SELECT COUNT(*) AS cnt FROM fines WHERE offender_name = :offender_name AND status <> 'paid'");
+        $countStmt->execute([':offender_name' => $data['offender_name']]);
+        $count = (int)($countStmt->fetch()['cnt'] ?? 0);
+        $fineAmount = (float)$data['fine_amount'];
+        if ($count >= 3) {
+            $fineAmount += 50.0;
+        }
+
         $sql = 'INSERT INTO fines (offender_name, offence_type, fine_amount, date_issued, status)
                 VALUES (:offender_name, :offence_type, :fine_amount, :date_issued, :status)
                 RETURNING *';
@@ -84,7 +111,7 @@ final class FineController
         $stmt->execute([
             ':offender_name' => $data['offender_name'],
             ':offence_type'  => $data['offence_type'],
-            ':fine_amount'   => $data['fine_amount'],
+            ':fine_amount'   => $fineAmount,
             ':date_issued'   => $data['date_issued'],
             ':status'        => $status,
         ]);
@@ -206,18 +233,50 @@ final class FineController
      */
     public function markAsPaid(Request $request, Response $response, array $args): Response
     {
+        $this->applyOverduePenalties();
+
         $id = (int)$args['id'];
+
         $sql = "UPDATE fines
-            SET status = 'paid'
-            WHERE fine_id = :id AND status <> 'paid'";
+                SET status = 'paid',
+                    fine_amount = CASE
+                        WHEN CURRENT_DATE <= (date_issued + INTERVAL '14 days') THEN ROUND(fine_amount * 0.90, 2)
+                        ELSE fine_amount
+                    END
+                WHERE fine_id = :id AND status <> 'paid'
+                RETURNING fine_id";
         $stmt = $this->pdo->prepare($sql);
         $stmt->execute([':id' => $id]);
+        $updated = $stmt->fetch(\PDO::FETCH_ASSOC);
 
-        if ($stmt->rowCount() === 0) {
-            $response->getBody()->write(json_encode(['error' => 'Not found']));
-            return $response->withStatus(404)->withHeader('Content-Type', 'application/json');
+        // When fine successfully marked as paid
+        if ($updated) {
+            return $response->withStatus(204);
         }
 
-        return $response->withStatus(204);
+        $check = $this->pdo->prepare("SELECT status FROM fines WHERE fine_id = :id");
+        $check->execute([':id' => $id]);
+        $row = $check->fetch(\PDO::FETCH_ASSOC);
+
+        if (!$row) {
+            $response->getBody()->write(json_encode(['error' => 'Fine not found']));
+            return $response
+                ->withStatus(404)
+                ->withHeader('Content-Type', 'application/json');
+        }
+
+        if ($row['status'] === 'paid') {
+            $response->getBody()->write(json_encode(['error' => 'Fine already paid']));
+            return $response
+                ->withStatus(409)
+                ->withHeader('Content-Type', 'application/json');
+        }
+
+        // Fallback (unexpected state)
+        $response->getBody()->write(json_encode(['error' => 'Unable to mark as paid']));
+        return $response
+            ->withStatus(409)
+            ->withHeader('Content-Type', 'application/json');
     }
+
 }
